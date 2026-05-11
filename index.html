@@ -138,7 +138,7 @@
 
         // API 키 설정 이벤트
         document.getElementById('api-key-btn').addEventListener('click', () => {
-            const newKey = prompt("Google AI Studio에서 발급받은 Gemini API 키를 입력하세요.\n(키는 귀하의 브라우저에만 안전하게 보관됩니다)", apiKey);
+            const newKey = prompt("Google AI Studio에서 발급받은 Gemini API 키를 입력하세요.\n(주의: 실무 환경에서는 서버를 통한 안전한 관리가 권장됩니다.)", apiKey);
             if (newKey !== null) {
                 apiKey = newKey.trim();
                 localStorage.setItem('gemini_api_key', apiKey);
@@ -150,8 +150,8 @@
 
         // 공통 Gemini API 호출 함수 (가용 모델 자동 감지 및 지수 백오프 적용)
         async function callGemini(prompt, useSearch = false, isJson = false) {
-            // 기본은 가장 안정적인 gemini-1.5-flash 모델로 시도
-            let modelName = apiKey ? "gemini-1.5-flash" : "gemini-2.5-flash-preview-09-2025";
+            // 안정화된 최신 버전 모델을 기본값으로 수정
+            let modelName = apiKey ? "gemini-1.5-flash" : "gemini-2.0-flash";
             
             let payload = {
                 contents: [{ parts: [{ text: prompt }] }]
@@ -162,7 +162,7 @@
                 if (apiKey) {
                     payload.tools = [{ googleSearch: {} }]; // 정식 API 규격
                 } else {
-                    payload.tools = [{ google_search: {} }]; // Canvas 내부 규격
+                    payload.tools = [{ google_search: {} }]; // Canvas 내부 규격 또는 예비 파라미터
                 }
             }
 
@@ -193,10 +193,10 @@
                                     const available = listData.models.map(m => m.name.replace('models/', ''));
                                     console.log("사용 가능한 모델 목록:", available.join(', '));
                                     
-                                    // 1순위: 1.5 flash, 2순위: 1.5 pro, 3순위: 1.0 pro, 4순위: 아무 gemini
-                                    if (available.includes('gemini-1.5-flash')) modelName = 'gemini-1.5-flash';
+                                    // 1순위: 2.0 flash, 2순위: 1.5 flash, 3순위: 1.5 pro
+                                    if (available.includes('gemini-2.0-flash')) modelName = 'gemini-2.0-flash';
+                                    else if (available.includes('gemini-1.5-flash')) modelName = 'gemini-1.5-flash';
                                     else if (available.includes('gemini-1.5-pro')) modelName = 'gemini-1.5-pro';
-                                    else if (available.includes('gemini-1.0-pro')) modelName = 'gemini-1.0-pro';
                                     else modelName = available.find(m => m.includes('gemini')) || 'gemini-1.5-flash';
                                 }
                             } catch(e) {
@@ -225,7 +225,13 @@
                     
                     if (isJson) {
                         text = text.replace(/```json/g, '').replace(/```/g, '').trim();
-                        return JSON.parse(text);
+                        // JSON 파싱 에러 방지를 위한 try...catch 처리
+                        try {
+                            return JSON.parse(text);
+                        } catch (parseError) {
+                            console.error("JSON 파싱 실패:", text, parseError);
+                            return null; // 실패 시 null을 반환하여 이후 로직에서 Fallback 데이터를 표시하도록 유도
+                        }
                     }
                     return text;
 
