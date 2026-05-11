@@ -125,7 +125,7 @@
     </footer>
 
     <script>
-        // 로컬 스토리지에서 안전하게 API 키 불러오기 (하드코딩 방지)
+        // 로컬 스토리지에서 안전하게 API 키 불러오기
         let apiKey = localStorage.getItem('gemini_api_key') || ""; 
 
         // 어제 날짜 계산
@@ -148,29 +148,31 @@
             }
         });
 
-        // 공통 Gemini API 호출 함수 (지수 백오프 적용 및 모델 자동전환)
+        // 공통 Gemini API 호출 함수 (가용 모델 자동 감지 및 지수 백오프 적용)
         async function callGemini(prompt, useSearch = false, isJson = false) {
-            // 명확하게 latest 식별자가 붙은 모델명을 사용하여 404 에러를 방지합니다.
-            let modelName = apiKey ? "gemini-1.5-flash-latest" : "gemini-2.5-flash-preview-09-2025";
-            let url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+            // 기본은 가장 안정적인 gemini-1.5-flash 모델로 시도
+            let modelName = apiKey ? "gemini-1.5-flash" : "gemini-2.5-flash-preview-09-2025";
             
-            const payload = {
+            let payload = {
                 contents: [{ parts: [{ text: prompt }] }]
             };
 
+            // 검색 도구 세팅
             if (useSearch) {
                 if (apiKey) {
-                    payload.tools = [{ googleSearch: {} }];
+                    payload.tools = [{ googleSearch: {} }]; // 정식 API 규격
                 } else {
-                    payload.tools = [{ google_search: {} }];
+                    payload.tools = [{ google_search: {} }]; // Canvas 내부 규격
                 }
             }
 
-            let retries = 5;
+            let retries = 4;
             let delay = 1000;
 
             for (let i = 0; i < retries; i++) {
                 try {
+                    let url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+                    
                     const response = await fetch(url, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -181,18 +183,38 @@
                         const errorData = await response.json().catch(() => ({}));
                         const errMsg = errorData.error?.message || response.status;
                         
-                        // 404 에러 발생 시 다른 지원 모델로 자동 전환하여 재시도 (안전장치)
+                        // 404 에러 발생 시, API 키로 사용 가능한 모델 목록을 조회하여 동적 전환
                         if (response.status === 404 && apiKey) {
-                            if (modelName === "gemini-1.5-flash-latest") {
-                                modelName = "gemini-1.5-pro-latest"; // Flash 실패 시 Pro로 변경
-                            } else if (modelName === "gemini-1.5-pro-latest") {
-                                modelName = "gemini-pro"; // 최후의 수단
+                            console.warn(`[${modelName}] 404 에러. 가용 모델을 실시간 검색합니다...`);
+                            try {
+                                const listRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+                                if (listRes.ok) {
+                                    const listData = await listRes.json();
+                                    const available = listData.models.map(m => m.name.replace('models/', ''));
+                                    console.log("사용 가능한 모델 목록:", available.join(', '));
+                                    
+                                    // 1순위: 1.5 flash, 2순위: 1.5 pro, 3순위: 1.0 pro, 4순위: 아무 gemini
+                                    if (available.includes('gemini-1.5-flash')) modelName = 'gemini-1.5-flash';
+                                    else if (available.includes('gemini-1.5-pro')) modelName = 'gemini-1.5-pro';
+                                    else if (available.includes('gemini-1.0-pro')) modelName = 'gemini-1.0-pro';
+                                    else modelName = available.find(m => m.includes('gemini')) || 'gemini-1.5-flash';
+                                }
+                            } catch(e) {
+                                modelName = "gemini-1.5-pro"; // 통신 실패 시 폴백
                             }
-                            url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
-                            throw new Error(`모델명 인식 오류(404) 발생. ${modelName} 모델로 자동 전환하여 재시도합니다.`);
+                            
+                            // 검색 도구가 404/400의 원인일 수 있으므로 안전을 위해 payload에서 제거
+                            delete payload.tools; 
+                            throw new Error(`모델 오류(404). 가용 모델(${modelName}) 지정 및 안전 모드(검색 제외)로 재시도합니다.`);
                         }
 
-                        if(response.status === 400 || response.status === 403) {
+                        // 검색 도구 지원 불가 에러일 경우 도구만 제거하고 재시도
+                        if (response.status === 400 && errMsg.toLowerCase().includes("tool")) {
+                            delete payload.tools;
+                            throw new Error("검색 도구를 지원하지 않는 환경입니다. 도구 제외 후 재시도합니다.");
+                        }
+
+                        if (response.status === 400 || response.status === 403) {
                             throw new Error(`API 권한/요청 오류: ${errMsg}`);
                         }
                         throw new Error(`API Error: ${errMsg}`);
@@ -210,12 +232,13 @@
                 } catch (e) {
                     console.warn(`[재시도 ${i+1}/${retries}]`, e.message);
                     
-                    if (i === retries - 1 || (e.message.includes("API 권한/요청 오류") && response?.status !== 404)) {
+                    // 권한 없음 에러 등은 재시도하지 않고 바로 중단
+                    if (i === retries - 1 || (e.message.includes("API 권한") && !e.message.includes("404"))) {
                         console.error("Gemini API 호출 최종 실패:", e.message);
                         return null; 
                     }
                     await new Promise(res => setTimeout(res, delay));
-                    delay *= 2;
+                    delay *= 1.5;
                 }
             }
         }
